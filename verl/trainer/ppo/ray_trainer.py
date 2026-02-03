@@ -1383,6 +1383,11 @@ class RayPPOTrainer:
                         if not self.async_rollout_mode:
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
                         else:
+                            try:
+                                from verl.workers.rollout.sglang_rollout import set_sglang_rollout_step
+                                set_sglang_rollout_step(self.global_steps)
+                            except ImportError:
+                                pass
                             if curr_step_profile:
                                 self.async_rollout_manager.start_profile(global_step=self.global_steps)
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
@@ -1403,6 +1408,11 @@ class RayPPOTrainer:
                             if not self.async_rollout_mode:
                                 gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
                             else:
+                                try:
+                                    from verl.workers.rollout.sglang_rollout import set_sglang_rollout_step
+                                    set_sglang_rollout_step(self.global_steps)
+                                except ImportError:
+                                    pass
                                 if curr_step_profile:
                                     self.async_rollout_manager.start_profile()
                                 gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)

@@ -16,9 +16,21 @@ import heapq
 import logging
 import os
 import random
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 from uuid import uuid4
+
+try:
+    from verl.workers.rollout.sglang_rollout import (
+        get_sglang_log_manager,
+        get_sglang_log_path,
+        get_sglang_step,
+    )
+except ImportError:
+    get_sglang_log_manager = None
+    get_sglang_log_path = None
+    get_sglang_step = None
 
 import hydra
 import numpy as np
@@ -111,6 +123,7 @@ class AsyncLLMServerManager:
             TokenOutput: token output
         """
         server = self._choose_server(request_id)
+        t0 = time.perf_counter()
         output = await server.generate.remote(
             request_id=uuid4().hex,  # use new request_id for each turn
             prompt_ids=prompt_ids,
@@ -118,6 +131,10 @@ class AsyncLLMServerManager:
             image_data=image_data,
             video_data=video_data,
         )
+        duration_sec = time.perf_counter() - t0
+        if os.getenv("EXPERIMENT_NAME") and get_sglang_log_manager is not None and get_sglang_log_path is not None and get_sglang_step is not None:
+            log_path = get_sglang_log_path()
+            get_sglang_log_manager().log(log_path, "engine_async_generate", duration=duration_sec, step=get_sglang_step())
         return output
 
 
@@ -458,6 +475,7 @@ class AgentLoopWorker:
             batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
         )
 
+        t0_generate = time.perf_counter()
         tasks = []
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
@@ -468,6 +486,11 @@ class AgentLoopWorker:
                 )
             )
         outputs = await asyncio.gather(*tasks)
+
+        duration_sec = time.perf_counter() - t0_generate
+        if os.getenv("EXPERIMENT_NAME") and get_sglang_log_manager is not None and get_sglang_log_path is not None and get_sglang_step is not None:
+            log_path = get_sglang_log_path()
+            get_sglang_log_manager().log(log_path, "async_generate_duration", duration=duration_sec, step=get_sglang_step())
 
         output = self._postprocess(outputs)
 
