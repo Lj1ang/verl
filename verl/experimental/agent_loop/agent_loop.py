@@ -25,11 +25,13 @@ try:
     from verl.workers.rollout.sglang_rollout import (
         get_sglang_log_manager,
         get_sglang_log_path,
+        get_sglang_rank,
         get_sglang_step,
     )
 except ImportError:
     get_sglang_log_manager = None
     get_sglang_log_path = None
+    get_sglang_rank = None
     get_sglang_step = None
 
 import hydra
@@ -134,7 +136,12 @@ class AsyncLLMServerManager:
         duration_sec = time.perf_counter() - t0
         if os.getenv("EXPERIMENT_NAME") and get_sglang_log_manager is not None and get_sglang_log_path is not None and get_sglang_step is not None:
             log_path = get_sglang_log_path()
-            get_sglang_log_manager().log(log_path, "engine_async_generate", duration=duration_sec, step=get_sglang_step())
+            get_sglang_log_manager().log(
+                log_path, "engine_async_generate",
+                duration=duration_sec,
+                workid=get_sglang_rank() if get_sglang_rank is not None else None,
+                step=get_sglang_step(),
+            )
         return output
 
 
@@ -430,6 +437,17 @@ class AgentLoopWorker:
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
+        _log = (
+            os.getenv("EXPERIMENT_NAME")
+            and get_sglang_log_manager is not None
+            and get_sglang_log_path is not None
+            and get_sglang_step is not None
+        )
+        if _log:
+            _t0_step = time.perf_counter()
+        else:
+            _t0_step = None
+
         config = self.config.actor_rollout_ref.rollout
         sampling_params = dict(
             temperature=config.temperature,
@@ -475,6 +493,16 @@ class AgentLoopWorker:
             batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
         )
 
+        if _log and _t0_step is not None:
+            _preprocess_duration = time.perf_counter() - _t0_step
+            get_sglang_log_manager().log(
+                get_sglang_log_path(),
+                "preprocessing_duration",
+                duration=_preprocess_duration,
+                workid=get_sglang_rank() if get_sglang_rank is not None else None,
+                step=get_sglang_step(),
+            )
+
         t0_generate = time.perf_counter()
         tasks = []
         for i in range(len(batch)):
@@ -488,11 +516,25 @@ class AgentLoopWorker:
         outputs = await asyncio.gather(*tasks)
 
         duration_sec = time.perf_counter() - t0_generate
-        if os.getenv("EXPERIMENT_NAME") and get_sglang_log_manager is not None and get_sglang_log_path is not None and get_sglang_step is not None:
+        if _log:
             log_path = get_sglang_log_path()
-            get_sglang_log_manager().log(log_path, "async_generate_duration", duration=duration_sec, step=get_sglang_step())
+            get_sglang_log_manager().log(
+                log_path, "async_generate_duration",
+                duration=duration_sec,
+                workid=get_sglang_rank() if get_sglang_rank is not None else None,
+                step=get_sglang_step(),
+            )
 
         output = self._postprocess(outputs)
+
+        if _log and _t0_step is not None:
+            get_sglang_log_manager().log(
+                get_sglang_log_path(),
+                "total_step_duration",
+                duration=time.perf_counter() - _t0_step,
+                workid=get_sglang_rank() if get_sglang_rank is not None else None,
+                step=get_sglang_step(),
+            )
 
         return output
 
