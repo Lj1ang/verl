@@ -13,6 +13,7 @@
 
 from verl.workers.rollout.sglang_rollout.log_manager import (
     SGLangLogManager,
+    build_profile_log_path,
     get_sglang_log_dir,
     get_sglang_log_manager,
     get_sglang_log_path,
@@ -24,6 +25,7 @@ from verl.workers.rollout.sglang_rollout.log_manager import (
 
 __all__ = [
     "SGLangLogManager",
+    "build_profile_log_path",
     "get_sglang_log_dir",
     "get_sglang_log_manager",
     "get_sglang_log_path",

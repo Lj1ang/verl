@@ -28,8 +28,12 @@ _current_rank = 0
 
 
 def get_sglang_log_dir() -> str:
-    """Base directory for profiling JSONL: logs/<EXPERIMENT_NAME>."""
-    return "logs/" + os.getenv("EXPERIMENT_NAME", "multiturn_log_dir")
+    """Base directory for profiling JSONL. Uses SGLANG_PROFILE_LOG_ROOT if set, else logs/<EXPERIMENT_NAME>."""
+    root = os.getenv("SGLANG_PROFILE_LOG_ROOT", "")
+    name = os.getenv("EXPERIMENT_NAME", "multiturn_log_dir")
+    if root:
+        return os.path.join(root, name)
+    return os.path.join("logs", name)
 
 
 def get_sglang_step() -> int:
@@ -54,11 +58,21 @@ def set_sglang_rollout_rank(rank: int) -> None:
     _current_rank = rank
 
 
-def get_sglang_log_path(step: Optional[int] = None, rank: Optional[int] = None) -> str:
-    """Path for worker JSONL: logs/<EXPERIMENT_NAME>/step_<step>/worker_<rank>.jsonl."""
-    step = step if step is not None else _current_step
-    rank = rank if rank is not None else _current_rank
-    return os.path.join(get_sglang_log_dir(), f"step_{step}", f"worker_{rank}.jsonl")
+def build_profile_log_path(log_dir: str, step: int, rank: int) -> str:
+    """Build step/worker profiling log path: log_dir/step_<step>/worker_<rank>.jsonl."""
+    return os.path.join(log_dir, f"step_{step}", f"worker_{rank}.jsonl")
+
+
+def get_sglang_log_path(
+    step: Optional[int] = None, rank: Optional[int] = None, log_dir: Optional[str] = None
+) -> str:
+    """Path for worker JSONL: log_dir/step_<step>/worker_<rank>.jsonl.
+    Uses get_sglang_log_dir() if log_dir is not provided.
+    """
+    step_val = step if step is not None else _current_step
+    rank_val = rank if rank is not None else _current_rank
+    base = log_dir if log_dir is not None else get_sglang_log_dir()
+    return build_profile_log_path(base, step_val, rank_val)
 
 
 class SGLangLogManager:
@@ -85,23 +99,24 @@ class SGLangLogManager:
         **extra_keys,
     ) -> None:
         handle = self.get_handle(log_path)
+        # Step/worker first for easy filtering and sorting (step/worker manner)
+        step_val = step if step is not None else _current_step
+        worker_val = workid if workid is not None else _current_rank
         log_entry = {
             "timestamp": datetime.now().isoformat(),
+            "step": step_val,
+            "worker": worker_val,
             "event": event,
         }
         if duration is not None:
             log_entry["duration_sec"] = duration
         if extra is not None:
             log_entry["extra"] = extra
-        if workid is not None:
-            log_entry["workid"] = workid
-        if step is not None:
-            log_entry["step"] = step
         if extra_keys:
             for key in extra_keys:
                 log_entry[key] = extra_keys[key]
-        ordered_keys = ["timestamp", "event", "duration_sec"] + [
-            k for k in log_entry if k not in ("timestamp", "event", "duration_sec")
+        ordered_keys = ["timestamp", "step", "worker", "event", "duration_sec"] + [
+            k for k in log_entry if k not in ("timestamp", "step", "worker", "event", "duration_sec")
         ]
         ordered_entry = {k: log_entry[k] for k in ordered_keys if k in log_entry}
         handle.write(json.dumps(ordered_entry) + "\n")

@@ -125,7 +125,10 @@ class AsyncLLMServerManager:
             TokenOutput: token output
         """
         server = self._choose_server(request_id)
-        t0 = time.perf_counter()
+        # Timing for engine_async_generate (sync GPU if available for accurate timing)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        generate_start_time = time.perf_counter()
         output = await server.generate.remote(
             request_id=uuid4().hex,  # use new request_id for each turn
             prompt_ids=prompt_ids,
@@ -133,14 +136,23 @@ class AsyncLLMServerManager:
             image_data=image_data,
             video_data=video_data,
         )
-        duration_sec = time.perf_counter() - t0
-        if os.getenv("EXPERIMENT_NAME") and get_sglang_log_manager is not None and get_sglang_log_path is not None and get_sglang_step is not None:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        generate_end_time = time.perf_counter()
+        duration_sec = generate_end_time - generate_start_time
+        if (
+            os.getenv("EXPERIMENT_NAME")
+            and get_sglang_log_manager is not None
+            and get_sglang_log_path is not None
+        ):
+            # step/worker path: log_dir/step_<step>/worker_<rank>.jsonl
             log_path = get_sglang_log_path()
             get_sglang_log_manager().log(
-                log_path, "engine_async_generate",
+                log_path,
+                event="engine_async_generate",
                 duration=duration_sec,
                 workid=get_sglang_rank() if get_sglang_rank is not None else None,
-                step=get_sglang_step(),
+                step=get_sglang_step() if get_sglang_step is not None else None,
             )
         return output
 
@@ -373,14 +385,22 @@ class AgentLoopWorker:
         config: DictConfig,
         server_handles: list[ray.actor.ActorHandle],
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        worker_rank: int = 0,
     ):
         """Initialize agent loop manager.
         Args:
             config (DictConfig): YAML config.
             server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
             reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+            worker_rank (int): Rank of this worker for profiling logs (worker_{rank}.jsonl).
         """
         self.config = config
+        self.worker_rank = worker_rank
+        try:
+            from verl.workers.rollout.sglang_rollout import set_sglang_rollout_rank
+            set_sglang_rollout_rank(worker_rank)
+        except ImportError:
+            pass
 
         # for recipe to change
         if not hasattr(self, "server_manager"):
@@ -988,7 +1008,7 @@ class AgentLoopManager:
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id, soft=True
                     ),
-                ).remote(self.config, self.server_handles, self.reward_loop_worker_handles)
+                ).remote(self.config, self.server_handles, self.reward_loop_worker_handles, i)
             )
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
