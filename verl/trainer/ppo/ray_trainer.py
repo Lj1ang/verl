@@ -60,6 +60,12 @@ from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
+
+try:
+    from verl.workers.rollout.sglang_rollout import get_sglang_log_manager, get_sglang_log_path
+except ImportError:
+    get_sglang_log_manager = None
+    get_sglang_log_path = None
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -1594,6 +1600,22 @@ class RayPPOTrainer:
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
+                        )
+
+                    # Record reward time_per_step to profile JSONL (step_X/worker_-1.jsonl) when profiling
+                    if (
+                        os.getenv("EXPERIMENT_NAME")
+                        and "reward" in timing_raw
+                        and get_sglang_log_manager is not None
+                        and get_sglang_log_path is not None
+                    ):
+                        log_path = get_sglang_log_path(step=self.global_steps, rank=-1)
+                        get_sglang_log_manager().log(
+                            log_path,
+                            "reward_duration",
+                            duration=timing_raw["reward"],
+                            workid=-1,
+                            step=self.global_steps,
                         )
 
                     # update critic
