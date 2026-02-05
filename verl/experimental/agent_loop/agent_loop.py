@@ -27,12 +27,14 @@ try:
         get_sglang_log_path,
         get_sglang_rank,
         get_sglang_step,
+        set_sglang_rollout_step,
     )
 except ImportError:
     get_sglang_log_manager = None
     get_sglang_log_path = None
     get_sglang_rank = None
     get_sglang_step = None
+    set_sglang_rollout_step = None
 
 import hydra
 import numpy as np
@@ -457,6 +459,12 @@ class AgentLoopWorker:
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
+        # Set current step in this worker so log paths and step field use correct step.
+        # (Trainer sets step only in driver process; workers run in separate processes.)
+        if set_sglang_rollout_step is not None:
+            global_step = batch.meta_info.get("global_steps", 0)
+            set_sglang_rollout_step(global_step)
+
         _log = (
             os.getenv("EXPERIMENT_NAME")
             and get_sglang_log_manager is not None
