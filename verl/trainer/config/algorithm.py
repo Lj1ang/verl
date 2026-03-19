@@ -565,6 +565,22 @@ class RolloutCorrectionConfig(BaseConfig):
 
 
 @dataclass
+class VineConfig(BaseConfig):
+    """Configuration for VinePPO.
+
+    Args:
+        num_branches (int): Number of branch rollouts per boundary (K').
+        step_separators (list[str]): Suffix strings that mark a reasoning-step end.
+        max_branches_per_rollout (int): Cap on boundaries per rollout; if exceeded,
+            boundaries are uniformly subsampled.
+    """
+
+    num_branches: int = 8
+    step_separators: list[str] = field(default_factory=lambda: ["\n"])
+    max_branches_per_rollout: int = 16
+
+
+@dataclass
 class AlgoConfig(BaseConfig):
     """Configuration for the algorithm.
 
@@ -612,3 +628,4 @@ class AlgoConfig(BaseConfig):
     # Rollout Correction: corrects off-policy issues (policy mismatch, model staleness, distribution shifts)
     # Set to None to disable, use RolloutCorrectionConfig presets (e.g., .tis(), .mis()), or pass dict
     rollout_correction: Optional[RolloutCorrectionConfig] = None
+    vine: Optional[VineConfig] = None
