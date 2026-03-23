@@ -41,3 +41,37 @@ def find_step_boundaries(
             boundaries.append(i)
         prev_decoded = decoded
     return boundaries
+
+
+def broadcast_value_to_tokens(
+    boundaries: Sequence[int],
+    v_hat: Sequence[float],
+    response_length: int,
+    fallback: float,
+) -> torch.Tensor:
+    """Broadcast per-boundary V-hat values to per-token values.
+
+    Token t at position p in the response is assigned V-hat[k] where k is the
+    largest index with boundaries[k] <= p. Tokens before the first boundary use
+    `fallback` (typically the GRPO group-mean baseline).
+
+    Args:
+        boundaries: Sorted token positions in [1, response_length] marking step ends.
+        v_hat: V-hat values, one per boundary; len(v_hat) must equal len(boundaries).
+        response_length: Total response length in tokens.
+        fallback: Value for tokens before the first boundary (or all tokens if no boundaries).
+
+    Returns:
+        1-D float tensor of length `response_length`.
+    """
+    if len(boundaries) != len(v_hat):
+        raise ValueError(
+            f"len(boundaries)={len(boundaries)} != len(v_hat)={len(v_hat)}"
+        )
+    out = torch.full((response_length,), float(fallback))
+    for k, b in enumerate(boundaries):
+        # Tokens at positions [b, b_{k+1}) get v_hat[k].
+        end = boundaries[k + 1] if k + 1 < len(boundaries) else response_length
+        if b < response_length:
+            out[b:end] = float(v_hat[k])
+    return out

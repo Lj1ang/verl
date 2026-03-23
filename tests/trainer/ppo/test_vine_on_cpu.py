@@ -42,3 +42,36 @@ def test_find_step_boundaries_multiple_separators():
     tok = FakeTokenizer({0: "a", 1: "\n\n", 2: "b", 3: ".", 4: "c"})
     boundaries = find_step_boundaries([0, 1, 2, 3, 4], tok, separators=["\n", "."])
     assert boundaries == [2, 4]
+
+
+def test_broadcast_value_to_tokens_basic():
+    from verl.trainer.ppo.vine import broadcast_value_to_tokens
+
+    # boundaries=[3, 7, 10], v_hat=[1.0, 2.0, 3.0], response_length=12, fallback=0.5.
+    # Step assignment: tokens 0..2 → fallback (no preceding boundary)
+    #                  tokens 3..6 → v_hat[0] (after boundary 3)
+    #                  tokens 7..9 → v_hat[1] (after boundary 7)
+    #                  tokens 10..11 → v_hat[2] (after boundary 10)
+    out = broadcast_value_to_tokens(
+        boundaries=[3, 7, 10],
+        v_hat=[1.0, 2.0, 3.0],
+        response_length=12,
+        fallback=0.5,
+    )
+    expected = torch.tensor([0.5, 0.5, 0.5, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0])
+    assert torch.allclose(out, expected)
+
+
+def test_broadcast_value_to_tokens_no_boundaries():
+    from verl.trainer.ppo.vine import broadcast_value_to_tokens
+
+    out = broadcast_value_to_tokens(boundaries=[], v_hat=[], response_length=5, fallback=0.7)
+    expected = torch.full((5,), 0.7)
+    assert torch.allclose(out, expected)
+
+
+def test_broadcast_value_to_tokens_length_mismatch_raises():
+    from verl.trainer.ppo.vine import broadcast_value_to_tokens
+
+    with pytest.raises(ValueError):
+        broadcast_value_to_tokens(boundaries=[3], v_hat=[1.0, 2.0], response_length=5, fallback=0.0)
