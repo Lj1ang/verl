@@ -75,3 +75,29 @@ def broadcast_value_to_tokens(
         if b < response_length:
             out[b:end] = float(v_hat[k])
     return out
+
+
+def compute_vine_advantage(
+    token_level_rewards: torch.Tensor,
+    v_hat_per_token: torch.Tensor,
+    response_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute VinePPO per-token advantages and returns.
+
+    Args:
+        token_level_rewards: shape (bs, response_length). Outcome reward placed at
+            the last response token; other positions zero (verl convention).
+        v_hat_per_token: shape (bs, response_length). Per-token V-hat from
+            broadcast_value_to_tokens, with fallback applied.
+        response_mask: shape (bs, response_length). 1 for valid response tokens,
+            0 for padding.
+
+    Returns:
+        advantages: (bs, response_length) — (R - V_hat) * mask, broadcast across tokens.
+        returns: (bs, response_length) — R * mask broadcast.
+    """
+    # Sum to get the scalar outcome reward per rollout.
+    R_per_rollout = token_level_rewards.sum(dim=-1, keepdim=True)  # (bs, 1)
+    advantages = (R_per_rollout - v_hat_per_token) * response_mask
+    returns = R_per_rollout * response_mask
+    return advantages, returns

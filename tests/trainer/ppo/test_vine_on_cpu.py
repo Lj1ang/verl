@@ -75,3 +75,26 @@ def test_broadcast_value_to_tokens_length_mismatch_raises():
 
     with pytest.raises(ValueError):
         broadcast_value_to_tokens(boundaries=[3], v_hat=[1.0, 2.0], response_length=5, fallback=0.0)
+
+
+def test_compute_vine_advantage_basic():
+    from verl.trainer.ppo.vine import compute_vine_advantage
+
+    # Two rollouts, response_length=4.
+    # token_level_rewards: outcome reward placed at the last masked token (verl convention).
+    # Rollout 0: R=1.0, V_hat per token = [0.0, 0.5, 0.5, 0.5]
+    # Rollout 1: R=0.0, V_hat per token = [0.0, 0.5, 0.5, 0.5]
+    R = torch.tensor([[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 0.0]])
+    v_hat = torch.tensor([[0.0, 0.5, 0.5, 0.5], [0.0, 0.5, 0.5, 0.5]])
+    mask = torch.tensor([[1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 0.0]])
+    advantages, returns = compute_vine_advantage(R, v_hat, mask)
+
+    # advantages = (R_per_rollout - v_hat) * mask
+    # R_per_rollout: [1.0, 0.0]
+    # Rollout 0: [1-0, 1-0.5, 1-0.5, 1-0.5] * [1,1,1,1] = [1.0, 0.5, 0.5, 0.5]
+    # Rollout 1: [0-0, 0-0.5, 0-0.5, 0-0.5] * [1,1,1,0] = [0.0, -0.5, -0.5, 0.0]
+    expected_adv = torch.tensor([[1.0, 0.5, 0.5, 0.5], [0.0, -0.5, -0.5, 0.0]])
+    assert torch.allclose(advantages, expected_adv)
+    # returns = R_per_rollout broadcast * mask
+    expected_ret = torch.tensor([[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]])
+    assert torch.allclose(returns, expected_ret)
