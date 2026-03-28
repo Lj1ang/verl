@@ -77,6 +77,30 @@ def test_broadcast_value_to_tokens_length_mismatch_raises():
         broadcast_value_to_tokens(boundaries=[3], v_hat=[1.0, 2.0], response_length=5, fallback=0.0)
 
 
+def test_compute_advantage_dispatches_to_vine():
+    from verl.protocol import DataProto
+    from verl.trainer.ppo.core_algos import AdvantageEstimator
+    from verl.trainer.ppo.ray_trainer import compute_advantage
+
+    bs, T = 2, 4
+    R = torch.tensor([[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 0.0]])
+    v_hat = torch.tensor([[0.0, 0.5, 0.5, 0.5], [0.0, 0.5, 0.5, 0.5]])
+    mask = torch.ones(bs, T)
+    data = DataProto.from_single_dict(
+        {
+            "token_level_rewards": R,
+            "response_mask": mask,
+            "vine_v_hat_per_token": v_hat,
+            "responses": torch.zeros(bs, T, dtype=torch.long),
+            "attention_mask": torch.ones(bs, 2 * T, dtype=torch.long),
+        }
+    )
+    out = compute_advantage(data, adv_estimator=AdvantageEstimator.VINE, config=None)
+    assert "advantages" in out.batch
+    assert "returns" in out.batch
+    assert out.batch["advantages"].shape == (bs, T)
+
+
 def test_compute_vine_advantage_basic():
     from verl.trainer.ppo.vine import compute_vine_advantage
 

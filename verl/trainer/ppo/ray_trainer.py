@@ -194,6 +194,23 @@ def compute_advantage(
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.VINE:
+        # VinePPO: per-token V_hat is pre-computed by the trainer (see fit() loop)
+        # and stored in data.batch["vine_v_hat_per_token"].
+        from verl.trainer.ppo.vine import compute_vine_advantage
+
+        if "vine_v_hat_per_token" not in data.batch:
+            raise RuntimeError(
+                "VinePPO requires 'vine_v_hat_per_token' in data.batch. "
+                "Was the branch-rollout pass run before compute_advantage?"
+            )
+        advantages, returns = compute_vine_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            v_hat_per_token=data.batch["vine_v_hat_per_token"],
+            response_mask=data.batch["response_mask"],
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
     else:
         # handle all other adv estimator type other than GAE and GRPO
         adv_estimator_fn = core_algos.get_adv_estimator_fn(adv_estimator)
