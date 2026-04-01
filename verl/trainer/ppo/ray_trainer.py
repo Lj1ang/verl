@@ -133,6 +133,33 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
+def _group_mean_baseline(R_per_rollout: torch.Tensor, uids) -> torch.Tensor:
+    """GRPO-style group-mean fallback for VinePPO when a rollout has no boundaries.
+
+    Args:
+        R_per_rollout: (bs,) scalar reward per rollout.
+        uids: array-like of group ids (e.g. data.non_tensor_batch["uid"]). If None,
+            uses a single global group.
+
+    Returns:
+        (bs,) tensor where each entry is the mean of R_per_rollout in its group.
+    """
+    out = R_per_rollout.clone()
+    if uids is None:
+        out[:] = R_per_rollout.mean() if R_per_rollout.numel() > 0 else 0.0
+        return out
+    from collections import defaultdict
+
+    groups: dict = defaultdict(list)
+    for i, u in enumerate(uids):
+        groups[u].append(i)
+    for _, idxs in groups.items():
+        m = R_per_rollout[idxs].mean()
+        for i in idxs:
+            out[i] = m
+    return out
+
+
 def compute_advantage(
     data: DataProto,
     adv_estimator: AdvantageEstimator,
@@ -1467,6 +1494,57 @@ class RayPPOTrainer:
                             batch.batch["reward_baselines"] = reward_baseline_tensor
 
                             del rm_scores, gen_baseline_batch, gen_baseline_output
+
+                    if self.config.algorithm.adv_estimator == AdvantageEstimator.VINE:
+                        if self.reward_fn is None:
+                            raise ValueError("A reward_fn is required for VinePPO.")
+
+                        from verl.trainer.ppo.vine import broadcast_value_to_tokens, run_branch_rollouts
+
+                        with marked_timer("gen_branch", timing_raw, color="cyan"):
+                            vine_cfg = self.config.algorithm.vine
+                            dispatch = (
+                                self.actor_rollout_wg.generate_sequences
+                                if not self.async_rollout_mode
+                                else self.async_rollout_manager.generate_sequences
+                            )
+
+                            def _score_branches(branch_output):
+                                return self._compute_or_extract_reward(
+                                    branch_output, reward_fn=self.reward_fn, sum_reward=True
+                                )
+
+                            v_hat, boundaries_per_rollout, vine_metrics = run_branch_rollouts(
+                                main_rollouts=gen_batch_output,
+                                tokenizer=self.tokenizer,
+                                rollout_dispatch_fn=dispatch,
+                                reward_score_fn=_score_branches,
+                                num_branches=vine_cfg.num_branches,
+                                step_separators=vine_cfg.step_separators,
+                                max_branches_per_rollout=vine_cfg.max_branches_per_rollout,
+                            )
+
+                            R_per_rollout = gen_batch_output.batch["token_level_rewards"].sum(dim=-1) \
+                                if "token_level_rewards" in gen_batch_output.batch \
+                                else torch.zeros(gen_batch_output.batch["responses"].shape[0])
+                            uids = gen_batch_output.non_tensor_batch.get("uid", None)
+                            fallback_per_rollout = _group_mean_baseline(R_per_rollout, uids)
+
+                            response_length = gen_batch_output.batch["responses"].size(1)
+                            bs_local = gen_batch_output.batch["responses"].size(0)
+                            v_hat_per_token = torch.zeros(bs_local, response_length)
+                            for i in range(bs_local):
+                                bnd = boundaries_per_rollout[i]
+                                vh = v_hat[i, : len(bnd)].tolist() if len(bnd) > 0 else []
+                                v_hat_per_token[i] = broadcast_value_to_tokens(
+                                    boundaries=bnd,
+                                    v_hat=vh,
+                                    response_length=response_length,
+                                    fallback=float(fallback_per_rollout[i]),
+                                )
+                            gen_batch_output.batch["vine_v_hat_per_token"] = v_hat_per_token
+                            metrics.update({f"vine/{k}": v for k, v in vine_metrics.items()})
+
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
