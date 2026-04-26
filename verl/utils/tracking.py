@@ -165,11 +165,22 @@ class Tracking:
                 logger_instance.log(data=data, step=step)
 
     def finish(self):
-        """Close all loggers. Call explicitly at end of training to avoid atexit BrokenPipeError (e.g. wandb)."""
+        """Close all loggers. Call explicitly at end of training to avoid atexit BrokenPipeError (e.g. wandb).
+
+        Why this exists separately from __del__: when training exits cleanly, __del__ may run
+        during interpreter shutdown — by then wandb's background thread / pipe may already be
+        torn down, so logger.finish() raises BrokenPipeError that surfaces as a noisy traceback.
+        Calling finish() explicitly from the trainer (val_only return, final return, etc.)
+        runs while sockets are still healthy. The idempotency guard makes it safe for __del__
+        to also call finish() as a backstop.
+        """
+        # Idempotency guard: __del__ also calls finish(), and the trainer may have called it
+        # already at the end of fit(). Re-running finish() on a closed wandb run logs warnings.
         _closed = getattr(self, "_finish_called", False)
         if _closed:
             return
         self._finish_called = True
+        # Each backend wrapped in try/except: one failing finish() must not stop the rest.
         try:
             if "wandb" in self.logger:
                 self.logger["wandb"].finish(exit_code=0)

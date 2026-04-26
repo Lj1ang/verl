@@ -21,6 +21,13 @@ from abc import ABC, abstractmethod
 from typing import Any, Optional
 from uuid import uuid4
 
+# Soft-import the SGLang profile-log helpers. agent_loop.py is part of the experimental
+# agent-loop runtime and does not strictly require sglang to be installed; when these
+# imports fail, every call site below gates on `is not None` and the timing instrumentation
+# becomes a no-op. The five symbols cover: (1) the file-handle manager, (2) the JSONL path
+# builder, (3) per-process rank getter, (4) per-process step getter, and (5) the per-process
+# step setter — workers run in their own Ray-actor processes, so they re-set the step
+# locally even though the trainer driver also sets it on its side.
 try:
     from verl.workers.rollout.sglang_rollout import (
         get_sglang_log_manager,
@@ -127,7 +134,10 @@ class AsyncLLMServerManager:
             TokenOutput: token output
         """
         server = self._choose_server(request_id)
-        # Timing for engine_async_generate (sync GPU if available for accurate timing)
+        # cuda.synchronize() bracketing the await: this method launches a remote SGLang call
+        # over Ray, but downstream consumers (and any local CUDA work this process did just
+        # before) need to be quiesced for time.perf_counter() to bound the engine-side
+        # work, not stale GPU traffic. Cheap if no CUDA work is pending; skipped on CPU.
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         generate_start_time = time.perf_counter()
@@ -142,6 +152,10 @@ class AsyncLLMServerManager:
             torch.cuda.synchronize()
         generate_end_time = time.perf_counter()
         duration_sec = generate_end_time - generate_start_time
+        # Profile-log gate: writes only when EXPERIMENT_NAME is set (i.e. user opted into
+        # profiling at launch time) AND the sglang log helpers imported successfully. This
+        # is the per-turn engine duration; the per-step aggregate is recorded below in
+        # AgentLoopWorker.generate_sequences as `async_generate_duration`.
         if (
             os.getenv("EXPERIMENT_NAME")
             and get_sglang_log_manager is not None
@@ -398,6 +412,12 @@ class AgentLoopWorker:
         """
         self.config = config
         self.worker_rank = worker_rank
+        # Stamp the worker rank into this process's sglang log_manager state so every
+        # subsequent get_sglang_log_path() call resolves to worker_<rank>.jsonl. Each
+        # AgentLoopWorker is a separate Ray actor / process, so the module-level state in
+        # log_manager is per-worker — set it once at construction. AgentLoopManager.__init__
+        # passes the rank index `i` into the constructor (see the .remote(...) call at the
+        # bottom of this file), giving stable rank-N filenames.
         try:
             from verl.workers.rollout.sglang_rollout import set_sglang_rollout_rank
             set_sglang_rollout_rank(worker_rank)
@@ -459,12 +479,18 @@ class AgentLoopWorker:
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
-        # Set current step in this worker so log paths and step field use correct step.
-        # (Trainer sets step only in driver process; workers run in separate processes.)
+        # Re-stamp the step in *this* worker process: the trainer driver also calls
+        # set_sglang_rollout_step at the start of the gen phase, but that update lives in
+        # the driver's process-local module state — Ray actors are separate Python
+        # processes, so the worker's _current_step would otherwise stay at 0. The driver
+        # passes the step via batch.meta_info["global_steps"], which is what we read here.
         if set_sglang_rollout_step is not None:
             global_step = batch.meta_info.get("global_steps", 0)
             set_sglang_rollout_step(global_step)
 
+        # _log is the master gate for all per-step profile writes in this method. Computed
+        # once at top so the body stays branch-light. EXPERIMENT_NAME being set is treated
+        # as the user's "I want profiling" signal (matches the convention in ray_trainer.py).
         _log = (
             os.getenv("EXPERIMENT_NAME")
             and get_sglang_log_manager is not None
@@ -521,6 +547,10 @@ class AgentLoopWorker:
             batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
         )
 
+        # Phase 1 boundary: everything from method-entry to here is "preprocessing"
+        # (sampling-param resolution, agent_name defaulting, trace selection, trajectory
+        # metadata fetch). Logging this separately lets us see whether per-step latency
+        # spikes come from prep work or the actual generate fan-out.
         if _log and _t0_step is not None:
             _preprocess_duration = time.perf_counter() - _t0_step
             get_sglang_log_manager().log(
@@ -543,6 +573,10 @@ class AgentLoopWorker:
             )
         outputs = await asyncio.gather(*tasks)
 
+        # Phase 2 boundary: span over the asyncio.gather of per-sample agent loops. This
+        # includes engine round-trips, tool calls and any sleeps inside _run_agent_loop.
+        # Sum of all per-turn `engine_async_generate` events (logged inside generate())
+        # should be <= async_generate_duration; the gap is tool/observation work.
         duration_sec = time.perf_counter() - t0_generate
         if _log:
             log_path = get_sglang_log_path()
@@ -555,6 +589,8 @@ class AgentLoopWorker:
 
         output = self._postprocess(outputs)
 
+        # Phase 3: end-to-end. preprocessing + async_generate + postprocess. Useful as the
+        # outer envelope when staring at the per-step timeline.
         if _log and _t0_step is not None:
             get_sglang_log_manager().log(
                 get_sglang_log_path(),
@@ -1016,6 +1052,9 @@ class AgentLoopManager:
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id, soft=True
                     ),
+                # Passing `i` as worker_rank: this becomes the rank stamped into the worker's
+                # log_manager (worker_<rank>.jsonl). Stable across the lifetime of the run
+                # because each Ray actor is created exactly once here.
                 ).remote(self.config, self.server_handles, self.reward_loop_worker_handles, i)
             )
 

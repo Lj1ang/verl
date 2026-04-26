@@ -13,7 +13,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Profiling log manager for SGLang multi-turn rollout (same format as PrinsYin/verl multiturn_profile_log)."""
+"""Profiling log manager for SGLang multi-turn rollout (same format as PrinsYin/verl multiturn_profile_log).
+
+Writes one JSONL file per (step, worker) under  <log_root>/<EXPERIMENT_NAME>/step_<N>/worker_<R>.jsonl.
+Each event line carries {timestamp, step, worker, event, duration_sec, ...} so downstream tooling
+can stitch a per-rank timeline of rollout/engine/tool/reward phases without re-aligning clocks.
+"""
 
 import atexit
 import json
@@ -22,7 +27,10 @@ from datetime import datetime
 from typing import Optional
 
 
-# Module-level step and rank for logging (set by trainer/rollout at start of each step).
+# Module-level (per-process) step/rank state. Each Ray worker process imports this module
+# independently, so the values are local to the worker. The trainer driver updates step at
+# the start of each rollout iteration; agent_loop workers also call set_sglang_rollout_step
+# from their own process because the driver-side update does not propagate across processes.
 _current_step = 0
 _current_rank = 0
 
@@ -76,10 +84,17 @@ def get_sglang_log_path(
 
 
 class SGLangLogManager:
-    """Logging for SGLang multi-turn rollout profiling (request/turn/engine/tool timings)."""
+    """Logging for SGLang multi-turn rollout profiling (request/turn/engine/tool timings).
+
+    File handles are kept open for the lifetime of the process and indexed by full log path,
+    so a worker that touches multiple (step, rank) paths reuses the same handle across calls.
+    Line-buffered (buffering=1) so a crash mid-rollout still leaves complete JSONL lines.
+    """
 
     def __init__(self):
         self.file_handles = {}
+        # atexit ensures handles flush even if the worker exits without an explicit close
+        # (e.g. Ray actor shutdown does not always run finalizers).
         atexit.register(self.close_all)
 
     def get_handle(self, log_path: str):
@@ -98,8 +113,11 @@ class SGLangLogManager:
         step: Optional[int] = None,
         **extra_keys,
     ) -> None:
+        # Schema for each line:
+        #   timestamp (ISO-8601), step, worker, event, [duration_sec], [extra], [**extra_keys]
+        # The fixed leading columns let downstream tooling group/sort without parsing every key.
         handle = self.get_handle(log_path)
-        # Step/worker first for easy filtering and sorting (step/worker manner)
+        # Fall back to module-level state when caller doesn't pass step/workid explicitly.
         step_val = step if step is not None else _current_step
         worker_val = workid if workid is not None else _current_rank
         log_entry = {
@@ -115,6 +133,8 @@ class SGLangLogManager:
         if extra_keys:
             for key in extra_keys:
                 log_entry[key] = extra_keys[key]
+        # Reorder so the fixed columns come first; any caller-supplied extras follow in
+        # insertion order. Makes hand-tailing and grep-based filtering predictable.
         ordered_keys = ["timestamp", "step", "worker", "event", "duration_sec"] + [
             k for k in log_entry if k not in ("timestamp", "step", "worker", "event", "duration_sec")
         ]

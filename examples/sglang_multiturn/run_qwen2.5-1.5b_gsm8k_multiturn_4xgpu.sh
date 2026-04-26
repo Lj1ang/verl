@@ -1,5 +1,12 @@
 # run on 4xH100
 # make sure your current working directory is the root of the project
+#
+# 4-GPU GRPO + SGLang multi-turn (Qwen2.5-1.5B Instruct, GSM8K + tool config).
+# Wires three log destinations:
+#   1) stdout/stderr -> $LOG_DIR/qwen2.5-1.5b_multiturn_4xgpu_<timestamp>.log
+#   2) verl FileLogger metrics -> $VERL_FILE_LOGGER_ROOT/<project>/<exp>.jsonl
+#   3) SGLang per-step/per-worker profiling -> $SGLANG_PROFILE_LOG_ROOT/$EXPERIMENT_NAME/step_*/worker_*.jsonl
+# EXPERIMENT_NAME is the gate for the per-worker profile JSONL (see log_manager.py).
 
 set -x
 export HYDRA_FULL_ERROR=1
