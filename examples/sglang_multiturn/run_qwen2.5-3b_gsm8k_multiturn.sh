@@ -13,8 +13,10 @@ function now() {
 }
 
 EXPERIMENT_NAME="qwen2.5-3b_baseline_$(now)"
+export EXPERIMENT_NAME
+LOGFILE="${EXPERIMENT_NAME}.log"
 
-python3 -m verl.trainer.main_ppo \
+nohup python3 -m verl.trainer.main_ppo \
     --config-path="$CONFIG_PATH" \
     --config-name='gsm8k_multiturn_grpo' \
     algorithm.adv_estimator=grpo \
@@ -52,7 +54,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.mode=async \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.logger='["console","wandb"]' \
+    trainer.logger='["console"]' \
     trainer.project_name='multi-turn-grpo-qwen2.5-3b-sglang' \
     trainer.experiment_name=$EXPERIMENT_NAME \
     trainer.n_gpus_per_node=8 \
@@ -63,5 +65,8 @@ python3 -m verl.trainer.main_ppo \
     data.train_files=$HOME/data/gsm8k/train.parquet \
     data.val_files=$HOME/data/gsm8k/test.parquet \
     actor_rollout_ref.rollout.multi_turn.tool_config_path="$PROJECT_DIR/examples/sglang_multiturn/config/tool_config/gsm8k_tool_config.yaml" \
-    trainer.total_epochs=15 $@
+    trainer.total_epochs=15 $@ \
+    > "$LOGFILE" 2>&1 &
+
+echo "Started in background. Log: $LOGFILE  (tail -f $LOGFILE)"
 

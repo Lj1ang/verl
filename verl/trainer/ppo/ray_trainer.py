@@ -60,6 +60,15 @@ from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
+
+# Soft-import the SGLang profile-log helpers: this trainer is shared with non-SGLang
+# rollouts, so we must not hard-require sglang/its dependencies. When the import fails
+# the helpers are set to None and every call site gates on `is not None`.
+try:
+    from verl.workers.rollout.sglang_rollout import get_sglang_log_manager, get_sglang_log_path
+except ImportError:
+    get_sglang_log_manager = None
+    get_sglang_log_path = None
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -1325,6 +1334,10 @@ class RayPPOTrainer:
             pprint(f"Initial validation metrics: {val_metrics}")
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
+                # Explicit logger.finish() before val-only return: closes wandb / file loggers
+                # cleanly while sockets are still healthy. Without this the atexit path can
+                # surface BrokenPipeError from wandb's background pipe.
+                logger.finish()
                 return
 
         if self.config.actor_rollout_ref.rollout.get("skip_rollout", False):
@@ -1383,6 +1396,15 @@ class RayPPOTrainer:
                         if not self.async_rollout_mode:
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
                         else:
+                            # Stamp the current global_step into the SGLang log_manager *driver-side*
+                            # so any code in the driver process that calls get_sglang_log_path() picks
+                            # up the right step. Note: agent_loop workers run in separate processes
+                            # and re-do this set inside AgentLoopWorker.generate_sequences().
+                            try:
+                                from verl.workers.rollout.sglang_rollout import set_sglang_rollout_step
+                                set_sglang_rollout_step(self.global_steps)
+                            except ImportError:
+                                pass
                             if curr_step_profile:
                                 self.async_rollout_manager.start_profile(global_step=self.global_steps)
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
@@ -1403,6 +1425,13 @@ class RayPPOTrainer:
                             if not self.async_rollout_mode:
                                 gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
                             else:
+                                # REMAX baseline rollout: same step-stamping as the main gen path so
+                                # any baseline-side log writes land under the correct step_<N>/ dir.
+                                try:
+                                    from verl.workers.rollout.sglang_rollout import set_sglang_rollout_step
+                                    set_sglang_rollout_step(self.global_steps)
+                                except ImportError:
+                                    pass
                                 if curr_step_profile:
                                     self.async_rollout_manager.start_profile()
                                 gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
@@ -1585,6 +1614,26 @@ class RayPPOTrainer:
                             config=self.config.algorithm,
                         )
 
+                    # Record reward time_per_step to profile JSONL (step_X/worker_-1.jsonl) when profiling.
+                    # rank=-1 is a sentinel for "trainer driver", so reward duration sits alongside
+                    # the per-worker rollout/engine durations under the same step directory and can
+                    # be merged into one timeline downstream. EXPERIMENT_NAME gates the writes so
+                    # production runs without profiling don't litter logs/.
+                    if (
+                        os.getenv("EXPERIMENT_NAME")
+                        and "reward" in timing_raw
+                        and get_sglang_log_manager is not None
+                        and get_sglang_log_path is not None
+                    ):
+                        log_path = get_sglang_log_path(step=self.global_steps, rank=-1)
+                        get_sglang_log_manager().log(
+                            log_path,
+                            "reward_duration",
+                            duration=timing_raw["reward"],
+                            workid=-1,
+                            step=self.global_steps,
+                        )
+
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
@@ -1702,6 +1751,9 @@ class RayPPOTrainer:
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
+                    # Mirror of the val-only finish() above: shut down loggers explicitly
+                    # before returning so wandb's pipe drains while the process is healthy.
+                    logger.finish()
                     return
 
                 # this is experimental and may be changed/removed in the future

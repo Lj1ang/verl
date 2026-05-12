@@ -10,3 +10,31 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
+
+# Re-export the SGLang profiling-log helpers so callers in the trainer / agent_loop layers
+# can import them from `verl.workers.rollout.sglang_rollout` without depending on the
+# log_manager module path. The trainer wraps these imports in a try/except ImportError so
+# environments without sglang installed degrade gracefully.
+from verl.workers.rollout.sglang_rollout.log_manager import (
+    SGLangLogManager,
+    build_profile_log_path,
+    get_sglang_log_dir,
+    get_sglang_log_manager,
+    get_sglang_log_path,
+    get_sglang_rank,
+    get_sglang_step,
+    set_sglang_rollout_rank,
+    set_sglang_rollout_step,
+)
+
+__all__ = [
+    "SGLangLogManager",
+    "build_profile_log_path",
+    "get_sglang_log_dir",
+    "get_sglang_log_manager",
+    "get_sglang_log_path",
+    "get_sglang_rank",
+    "get_sglang_step",
+    "set_sglang_rollout_rank",
+    "set_sglang_rollout_step",
+]

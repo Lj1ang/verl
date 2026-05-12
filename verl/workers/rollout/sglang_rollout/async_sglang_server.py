@@ -271,7 +271,10 @@ class SGLangHttpServer:
             "nnodes": self.nnodes,
             "trust_remote_code": self.model_config.trust_remote_code,
             "max_running_requests": self.config.get("max_num_seqs", None),
-            "log_level": "error",
+            # INFO enables throughput logs per decode batch (e.g. gen throughput token/s).
+            # Override via engine_kwargs.sglang.log_level="error" for quieter logs.
+            # Optional: log_requests=True, log_requests_level=2 for per-request I/O (verbose).
+            "log_level": engine_kwargs.pop("log_level", "INFO"),
             "mm_attention_backend": "fa3",
             "attention_backend": attention_backend if attention_backend is not None else "fa3",
             "skip_tokenizer_init": self.config.skip_tokenizer_init,
